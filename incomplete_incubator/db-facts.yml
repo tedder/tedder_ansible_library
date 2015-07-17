@@ -1,0 +1,7 @@
+---
+- hosts: localhost
+  name: grab RDS facts
+  pre_tasks:
+  - rds_facts: region=us-west-2
+    register: rds_facts_r
+  - debug: var=rds_facts_r

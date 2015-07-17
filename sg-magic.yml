@@ -1,0 +1,9 @@
+---
+- hosts: localhost
+  name: pull instances in given SG
+  pre_tasks:
+  - name: collect ec2 bits
+    ec2_sg_magic: security_group_id='sg-CHANGEME'
+    register: sg
+  - debug: var=sg
+  - debug: msg="{{sg.sg_instance_list.public_dns_name|join(',')}}"

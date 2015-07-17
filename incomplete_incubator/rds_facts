@@ -1,0 +1,101 @@
+#!/usr/bin/python
+#
+# copyright Ted Timmons 2015.
+# ted@timmons.me github.com/tedder twitter.com/tedder42
+#
+# May be redistributed under the general MIT license, with exceptions found in /LICENSE.md.
+
+DOCUMENTATION = '''
+---
+module: rds_inventory
+version_added: "external"
+short_description: 
+description:
+     - 
+requirements: [ "boto3" ]
+author: Ted Timmons
+'''
+
+EXAMPLES = '''
+'''
+
+import sys
+import time
+import boto3
+import json
+#from datetime import datetime
+import datetime
+
+from ansible.module_utils.basic import *
+from ansible.module_utils.ec2 import *
+
+def get_inventory(rds_client):
+  db_instances = rds_client.describe_db_instances(MaxRecords=100)
+
+  # do some cleanup before returning
+  for instance in db_instances['DBInstances']:
+arn:aws:rds:<region>:<account number>:<resourcetype>:<name>
+
+
+    identifier = instance['DBInstanceIdentifier']
+    rds_client.list_tags_for_resource(ResourceName=identifier)
+  return serialize(db_instances['DBInstances'])
+  #return serialize(db_instances)
+
+def serialize(items):
+  '''Think of this as a pre-JSON-serializer. Since we return an object to
+     Ansible and it handles serialization, we need to serialize things that
+     don't serialize well in default cases. datetime is the most obvious.'''
+
+  if isinstance(items, dict):
+    ret = {}
+    for key,value in items.items():
+      if isinstance(value, dict):
+        ret[key] = serialize(value)
+      if isinstance(value, list):
+        ret[key] = serialize(value)
+      elif isinstance(value, datetime.datetime):
+        ret[key] = value.isoformat()
+      else:
+        ret[key] = value
+    return ret
+
+  elif isinstance(items, list):
+    ret = []
+    for key in items:
+      if isinstance(key, dict):
+        ret.append(serialize(key))
+      elif isinstance(key, datetime.datetime):
+        ret.append(key.isoformat())
+      else:
+        ret.append(key)
+    return ret
+  return None
+
+def main():
+  argument_spec = dict(
+    state=dict(default='inventory', choices=['inventory', 'facts']),
+    region=dict(type='str')
+  )
+  #required_together = ( ['state', 's3_bucket_name'] )
+
+  module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=True)
+
+  #ec2_url, access_key, secret_key, region = get_ec2_creds(module)
+  #aws_connect_params = dict(aws_access_key_id=access_key,
+  #                          aws_secret_access_key=secret_key)
+
+  #if not region:
+  #  module.fail_json(msg="Region must be specified as a parameter, in EC2_REGION or AWS_REGION environment variables or in boto configuration file")
+  results = {}
+  rds_client = boto3.client('rds')
+
+  results['inventory'] = get_inventory(rds_client)
+
+  module.exit_json(**results)
+  #reparsed_results = json.loads(json.dumps(results, default=json_serial))
+  #module.exit_json(**reparsed_results)
+
+
+
+main()

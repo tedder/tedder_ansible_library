@@ -1,0 +1,92 @@
+#!/usr/bin/python
+#
+# copyright Ted Timmons 2015.
+# ted@timmons.me github.com/tedder twitter.com/tedder42
+#
+# May be redistributed under the general MIT license, with exceptions found in /LICENSE.md.
+
+DOCUMENTATION = '''
+---
+module: ec2_sg_magic
+version_added: "external"
+short_description: Magic information from security groups.
+description:
+- Most Ansible AWS modules are built for *doing* things, create facts, or create dynamic groups. This module is built to provide output to use during a task. Period.
+options:
+  security_group_id:
+    description:
+      - The security group ID to query information for. (sg-xxxxxxx)
+    required: true
+  state:
+    description:
+      - Do various things. Currently only 'list_instances'. So this is meant for the future.
+    choices: [ 'list_instances' ]
+    default: 'list_instances'
+    required: false
+
+author: Ted Timmons
+'''
+
+EXAMPLES = '''
+# Create list (for instance, maybe to place in a config file)
+- name: collect ec2 instances
+  ec2_sg_magic: security_group_id='sg-deadb33f'
+  register: sg
+- set_fact: server_list="{{sg.sg_instance_list.public_dns_name|join(',')}}"
+'''
+
+try:
+    import json
+except ImportError:
+    import simplejson as json
+
+import boto3
+from collections import defaultdict
+
+def sample_returns():
+  return true
+  #return module.exit_json(changed=True, msg=import_out,
+  #        rc=rc, cmd=import_cmd, stdout_lines=import_out)
+  #return module.exit_json(changed=False, msg=import_out,
+  #        rc=0, cmd=import_cmd, stdout_lines=import_out)
+  #return module.fail_json(msg=import_out, rc=rc, cmd=import_cmd)
+
+def list_instances(module, sgid):
+  ec2 = boto3.resource('ec2')
+
+  ret = defaultdict(list) 
+  for instance in ec2.instances.filter( Filters = [ { 'Name': 'instance.group-id', 'Values': [sgid] } ]):
+    ret['private_dns_name'].append(instance.private_dns_name)
+    ret['private_ip_address'].append(instance.private_ip_address)
+    ret['public_dns_name'].append(instance.public_dns_name)
+    ret['public_ip_address'].append(instance.public_ip_address)
+  return ret
+
+def main():
+    argument_spec = dict()
+    argument_spec.update(dict(
+            security_group_id = dict(required=True),
+            state = dict(required=False, default='list_instances', choices=['list_instances'])
+        )
+    )
+
+    module = AnsibleModule(
+        argument_spec=argument_spec,
+    )
+
+    filter = {}
+    sgid = module.params.get('security_group_id')
+    state = 'list_instances' # we might support other things later.
+
+    data = { 'changed':False }
+
+    if state == 'list_instances':
+        data['sg_instance_list'] = list_instances(module, sgid)
+
+    return module.exit_json(**data)
+
+# import module snippets
+from ansible.module_utils.basic import *
+
+if __name__ == "__main__":
+    main()
