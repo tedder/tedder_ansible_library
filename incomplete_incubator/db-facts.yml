@@ -2,6 +2,6 @@
 - hosts: localhost
   name: grab RDS facts
   pre_tasks:
-  - rds_facts: region=us-west-2
+  - rds_facts: region=us-east-1 account_id=862916455355
     register: rds_facts_r
   - debug: var=rds_facts_r

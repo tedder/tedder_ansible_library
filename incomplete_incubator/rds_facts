@@ -29,17 +29,43 @@ import datetime
 from ansible.module_utils.basic import *
 from ansible.module_utils.ec2 import *
 
-def get_inventory(rds_client):
+def get_entry_from_dictarray(dictarray, keyname):
+  for entry in dictarray:
+    if entry['Key'] == keyname:
+      return entry
+  return None
+
+def get_inventory(rds_client, region, account_number, match_tags=None):
   db_instances = rds_client.describe_db_instances(MaxRecords=100)
+
+  ret = []
 
   # do some cleanup before returning
   for instance in db_instances['DBInstances']:
-arn:aws:rds:<region>:<account number>:<resourcetype>:<name>
-
-
-    identifier = instance['DBInstanceIdentifier']
-    rds_client.list_tags_for_resource(ResourceName=identifier)
-  return serialize(db_instances['DBInstances'])
+    identifier = "arn:aws:rds:" + region + ":" + str(account_number) + ":db:" + instance['DBInstanceIdentifier']
+    tags = rds_client.list_tags_for_resource(ResourceName=identifier)
+    instance_matched = True
+    if match_tags:
+      for name, value in match_tags.items():
+        db_tag_entry = get_entry_from_dictarray(tags.get('TagList', [{}]), name)
+        #ret.append({'tagentry':db_tag_entry})
+        #ret.append({'tagentry':db_tag_entry, 'matchname':name, 'matchvalue':value})
+        if not db_tag_entry:
+          instance_matched = False
+        elif value != db_tag_entry['Value']:
+          instance_matched = False
+        #else:
+        #  ret.append({'matched':True, 'tagentry':db_tag_entry, 'matchname':name, 'matchvalue':value})
+        # else means we keep trying
+      # dropped out of the taglist, so we must've matched
+    if instance_matched:
+      ret.append({ 'matchtags': True, 'tags': serialize(tags), 'db': serialize(instance) })
+    #else:
+    #  ret.append({ 'matchtags': False, 'tags': serialize(tags), 'db': serialize(instance) })
+    #ret.append({ 'tags': tags, 'db': instance })
+  #return serialize(ret)
+  return ret
+  #return serialize(db_instances['DBInstances'])
   #return serialize(db_instances)
 
 def serialize(items):
@@ -75,11 +101,16 @@ def serialize(items):
 def main():
   argument_spec = dict(
     state=dict(default='inventory', choices=['inventory', 'facts']),
-    region=dict(type='str')
+    region=dict(type='str'),
+    account_number=dict(type='str', required=True), # hard to compose an ARN, making this a manual config is much easier.
+    match_tags=dict()
   )
   #required_together = ( ['state', 's3_bucket_name'] )
 
   module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=True)
+  account_number = module.params.get('account_number')
+  region = module.params.get('region')
+  match_tags = module.params.get('match_tags', None)
 
   #ec2_url, access_key, secret_key, region = get_ec2_creds(module)
   #aws_connect_params = dict(aws_access_key_id=access_key,
@@ -90,7 +121,8 @@ def main():
   results = {}
   rds_client = boto3.client('rds')
 
-  results['inventory'] = get_inventory(rds_client)
+  results['inventory'] = get_inventory(rds_client, region, account_number, match_tags)
+  results['match_tags'] = match_tags
 
   module.exit_json(**results)
   #reparsed_results = json.loads(json.dumps(results, default=json_serial))
