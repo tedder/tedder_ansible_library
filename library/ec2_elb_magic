@@ -139,7 +139,7 @@ def main():
     argument_spec.update(dict(
             elb_id = dict(required=False),
             match_tag_name = dict(required=False),
-            state = dict(required=False, default='list_elbs', choices=['list_elbs'])
+            state = dict(required=False, default='list_elbs', choices=['list_elbs']),
             aws_region = dict(required=False, default='us-east-1')
         )
     )
