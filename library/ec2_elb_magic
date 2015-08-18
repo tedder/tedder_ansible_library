@@ -1,0 +1,169 @@
+#!/usr/bin/python
+#
+# copyright Ted Timmons 2015 (for now)
+# authoritative mostly-open-source version is here: https://github.com/tedder/tedder_ansible_library/blob/master/library/ec2_elb_magic
+
+
+DOCUMENTATION = '''
+---
+module: ec2_elb_magic
+version_added: "external"
+short_description: Magic information from ELB security groups.
+description:
+- Most Ansible AWS modules are built for *doing* things, create facts, or create dynamic groups. This module is built to provide output to use during a task. Period.
+options:
+  security_group_id:
+    description:
+      - The security group ID to query information for. (sg-xxxxxxx)
+    required: true
+  state:
+    description:
+      - Do various things. Currently only 'list_instances'. So this is meant for the future.
+    choices: [ 'list_instances' ]
+    default: 'list_instances'
+    required: false
+
+author: Ted Timmons
+'''
+
+EXAMPLES = '''
+# Create list (for instance, maybe to place in a config file)
+- name: collect ec2 instances
+  ec2_magic: security_group_id='sg-deadb33f'
+  register: sg
+- set_fact: server_list="{{sg.sg_instance_list.public_dns_name|join(',')}}"
+'''
+
+try:
+    import json
+except ImportError:
+    import simplejson as json
+
+import boto3
+from collections import defaultdict
+import datetime
+
+def sample_returns():
+  return true
+  #return module.exit_json(changed=True, msg=import_out,
+  #        rc=rc, cmd=import_cmd, stdout_lines=import_out)
+  #return module.exit_json(changed=False, msg=import_out,
+  #        rc=0, cmd=import_cmd, stdout_lines=import_out)
+  #return module.fail_json(msg=import_out, rc=rc, cmd=import_cmd)
+
+def match_tag(lbtags, tag_name):
+  if not tag_name:
+    return None
+
+  for lb in lbtags['TagDescriptions']:
+    #return lb
+    for tag in lb['Tags']:
+      if tag['Key'] == 'Name' and tag['Value'] == tag_name:
+        return lb['LoadBalancerName']
+
+def _get_lb_state(self, lb_name):
+  """given a load balancer, returns a dict of instance states and state counts."""
+  conn = connect_to_aws(boto.ec2.elb, self.region, **self.aws_connect_params)
+  #elb = boto3.client('elb')
+
+  instance_states = []
+  state_counter = Counter()
+  for instance in conn.describe_instance_health(lb_name):
+    instance_states.append(dict(
+        description=instance.description,
+        instance_id=instance.instance_id,
+        reason_code=instance.reason_code,
+        state=instance.state,
+    ))
+    state_counter[instance.state] += 1
+  return {"instance_states":instance_states, "state_counter":state_counter}
+
+def list_elbs(module, tag_name, boto3_elb_client):
+  ret = defaultdict(list) 
+  lbs = boto3_elb_client.describe_load_balancers().get('LoadBalancerDescriptions', [])
+  tags = boto3_elb_client.describe_tags(LoadBalancerNames=[x['LoadBalancerName'] for x in lbs])
+
+  matched_elb = match_tag(tags, tag_name)
+
+  if not matched_elb:
+    return {'error':'could not find ELB given tags'}
+
+  for lb in lbs:
+    if lb['LoadBalancerName'] == matched_elb:
+      matched_elb_data = lb
+      break
+
+  if not matched_elb_data:
+    return {'error': 'did not find our load balancer after tag matching.'}
+
+  ret['SecurityGroups'] = matched_elb_data['SecurityGroups']
+  ret['DNSName'] = matched_elb_data['DNSName']
+  ret['LoadBalancerName'] = matched_elb_data['LoadBalancerName']
+  ret['_all'] = serialize(matched_elb_data)
+
+  return ret
+
+def serialize(items):
+  '''Think of this as a pre-JSON-serializer. Since we return an object to
+     Ansible and it handles serialization, we need to serialize things that
+     don't serialize well in default cases. datetime is the most obvious.'''
+
+  if isinstance(items, dict):
+    ret = {}
+    for key,value in items.items():
+      if isinstance(value, dict):
+        ret[key] = serialize(value)
+      if isinstance(value, list):
+        ret[key] = serialize(value)
+      elif isinstance(value, datetime.datetime):
+        ret[key] = value.isoformat()
+      else:
+        ret[key] = value
+    return ret
+
+  elif isinstance(items, list):
+    ret = []
+    for key in items:
+      if isinstance(key, dict):
+        ret.append(serialize(key))
+      elif isinstance(key, datetime.datetime):
+        ret.append(key.isoformat())
+      else:
+        ret.append(key)
+    return ret
+  return None
+
+
+def main():
+    argument_spec = dict()
+    argument_spec.update(dict(
+            elb_id = dict(required=False),
+            match_tag_name = dict(required=False),
+            state = dict(required=False, default='list_elbs', choices=['list_elbs'])
+            aws_region = dict(required=False, default='us-east-1')
+        )
+    )
+
+    module = AnsibleModule(
+        argument_spec=argument_spec,
+    )
+
+    filter = {}
+    state = 'list_elbs' # we might support other things later.
+    match_tag_name = module.params.get('match_tag_name')
+    aws_region = module.params.get('aws_region')
+
+    data = { 'changed':False }
+
+    boto3_elb_client = boto3.client('elb', region_name=aws_region)
+
+    if state == 'list_elbs':
+        data['elbs'] = list_elbs(module, match_tag_name, boto3_elb_client)
+
+    return module.exit_json(**data)
+
+# import module snippets
+from ansible.module_utils.basic import *
+
+if __name__ == "__main__":
+    main()
