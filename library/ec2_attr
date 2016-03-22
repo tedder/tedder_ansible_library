@@ -1,0 +1,133 @@
+#!/usr/bin/python
+#
+# copyright Ted Timmons 2015 (for now)
+# authoritative mostly-open-source version is here: https://github.com/tedder/tedder_ansible_library/blob/master/library/ec2_source_dest_check
+
+
+DOCUMENTATION = '''
+---
+module: ec2_attr
+version_added: "external"
+short_description: 
+description:
+- Enable/disable EC2 attributes. This can be done with the `ec2` module, but that isn't terribly appropriate for running instances. This does one thing well.
+options:
+  instance_id:
+    description:
+      - Instance ID. (i-xxxxxx)
+    required: true
+  source_dest_check:
+    description:
+      - Enable/disable source/dest check.
+    type: boolean
+    required: false
+  dry_run:
+    description:
+      - x
+    type: boolean
+    default: false
+    required: false
+
+author: Ted Timmons
+'''
+
+EXAMPLES = '''
+- name: disable our source/dest check
+  ec2_attr: instance_id=i-12345678 source_dest_check=False aws_region='us-east-1'
+'''
+
+try:
+    import json
+except ImportError:
+    import simplejson as json
+
+import boto3
+from collections import defaultdict
+import datetime
+
+def sample_returns():
+  return true
+  #return module.exit_json(changed=True, msg=import_out,
+  #        rc=rc, cmd=import_cmd, stdout_lines=import_out)
+  #return module.exit_json(changed=False, msg=import_out,
+  #        rc=0, cmd=import_cmd, stdout_lines=import_out)
+  #return module.fail_json(msg=import_out, rc=rc, cmd=import_cmd)
+
+def serialize(items):
+  '''Think of this as a pre-JSON-serializer. Since we return an object to
+     Ansible and it handles serialization, we need to serialize things that
+     don't serialize well in default cases. datetime is the most obvious.'''
+
+  if isinstance(items, dict):
+    ret = {}
+    for key,value in items.items():
+      if isinstance(value, dict):
+        ret[key] = serialize(value)
+      if isinstance(value, list):
+        ret[key] = serialize(value)
+      elif isinstance(value, datetime.datetime):
+        ret[key] = value.isoformat()
+      else:
+        ret[key] = value
+    return ret
+
+  elif isinstance(items, list):
+    ret = []
+    for key in items:
+      if isinstance(key, dict):
+        ret.append(serialize(key))
+      elif isinstance(key, datetime.datetime):
+        ret.append(key.isoformat())
+      else:
+        ret.append(key)
+    return ret
+  return None
+
+
+def main():
+    argument_spec = dict()
+    argument_spec.update(dict(
+            instance_id = dict(required=True),
+            source_dest_check = dict(required=False, type='bool'),
+            dry_run = dict(required=False, default=False),
+            aws_region = dict(required=False)
+        )
+    )
+
+    module = AnsibleModule(
+        argument_spec=argument_spec,
+    )
+
+    instance_id = module.params.get('instance_id')
+    sdcheck = module.params.get('source_dest_check')
+    dry_run = module.params.get('dry_run')
+    aws_region = module.params.get('aws_region')
+
+
+    data = { 'changed':False, 'dry_run': dry_run }
+
+    if aws_region:
+      ec2_client = boto3.client('ec2', region_name=aws_region)
+    else:
+      ec2_client = boto3.client('ec2')
+
+    # does instance exist?
+
+    if not sdcheck is None:
+      ec2_desc = ec2_client.describe_instance_attribute(InstanceId=instance_id, Attribute='sourceDestCheck')
+      #data['old_source_dest_check'] = serialize(ec2_desc)
+      data['prev_source_dest_check'] = ec2_desc['SourceDestCheck']['Value']
+      if data['prev_source_dest_check'] != sdcheck:
+        data['msg'] = "modifying sourcedest"
+        modify_ret = ec2_client.modify_instance_attribute(InstanceId=instance_id, Attribute='sourceDestCheck', Value=str(sdcheck), DryRun=dry_run)
+        data['changed'] = True
+        if modify_ret['ResponseMetadata']['HTTPStatusCode'] != 200:
+          return module.fail_json(msg="modify_instance_attribute failed for unknown reasons.")
+        
+    return module.exit_json(**data)
+
+# import module snippets
+from ansible.module_utils.basic import *
+
+if __name__ == "__main__":
+    main()
