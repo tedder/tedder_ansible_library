@@ -2,7 +2,7 @@
 
 ## Copyright
 
-copyright Ted Timmons 2015.
+copyright Ted Timmons 2016.
 
 - ted@timmons.me
 - github.com/tedder

@@ -1,0 +1,218 @@
+#!/usr/bin/python
+#
+# copyright Ted Timmons 2016 (for now; see repo's modified MIT license)
+# authoritative mostly-open-source version is here: https://github.com/tedder/tedder_ansible_library/blob/master/library/s3_sync
+
+DOCUMENTATION = '''
+---
+module: s3enc
+version_added: "external"
+short_description:
+description:
+- Client-side encryption methods for Python. These should be standard in boto3 but aren't.
+- based on open-source library here: https://github.com/tedder/s3-client-side-encryption/
+- This is compatible with client-side encryption in the Java AWS SDK.
+- No attempt has been made to ensure correct python libraries are installed. The root of this repo should have a requirements.txt, I suppose.
+options:
+  state:
+    description:
+    - put/get direction
+    default: put
+    required: true
+  path:
+    description:
+    - Path to file, either the destination or the input, depending on the state.
+    type: string
+    required: true
+  bucket:
+    description:
+    - s3 bucket
+    type: string
+    required: true
+  key:
+    description:
+    - s3 key
+    type: string
+    required: true
+  permission:
+    description:
+    - Set the canned permissions on the object/bucket that are created. The permissions that can be set are 'private', 'public-read', 'public-read-write', 'authenticated-read'. Does not accept a list.
+    - Placeholder; not implemented.
+    required: false
+    default: private
+  kms_arn:
+    description:
+    - full ARN for KMS key. This is about 60 characters starting with "arn:aws:kms:...". It is NOT the text label of the key.
+    - not required for 'get'. Library will extract the key used to encrypt the file (it's stored in the s3 metadata)
+    - required if 'put'. No "require" validation implemented yet.
+
+author: Ted Timmons
+'''
+
+EXAMPLES = '''
+- name: upload to s3
+  s3enc: state=put path=/home/generated_files/ bucket=mybucket key_prefix=generated/
+- name: upload
+  local_action: s3enc state=put path=cat.jpg bucket=mybucket key=enc/cat.jpg kms_arn=arn:aws:kms:us-east-1:999999999999:key/5eef912f-55bb-4628-9fef-65be40d8adb1
+- name: download
+  local_action: s3enc state=get path=_cat.jpg bucket=mybucket key=enc/cat.jpg
+'''
+
+try:
+    import json
+except ImportError:
+    import simplejson as json
+
+import datetime
+import base64
+from Crypto.Cipher import AES # pycryptodome
+from Crypto import Random
+import boto3
+import os
+import struct
+import tempfile
+
+
+# generating this "encrypt and put" code by:
+# (a) reversing the decrypt, which I know works
+# (b) black-boxing output (metadata) to match the Java SDK
+# (c) using this: https://github.com/aws/aws-sdk-ruby/blob/master/aws-sdk-resources/lib/aws-sdk-resources/services/s3/encryption/kms_cipher_provider.rb#L16
+
+# decrypt_file method from: http://eli.thegreenplace.net/2010/06/25/aes-encryption-of-files-in-python-with-pycrypto
+# via: https://github.com/boto/boto3/issues/38#issuecomment-174106849
+def encrypt_file(key, in_filename, iv, original_size, out_filename, chunksize=16*1024):
+    with open(in_filename, 'rb') as infile:
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+
+        with open(out_filename, 'wb') as outfile:
+            while True:
+                chunk = infile.read(chunksize)
+                if len(chunk) == 0:
+                    break
+                elif len(chunk) % 16 != 0:
+                    length = 16 - (len(chunk) % 16)
+                    # not py2 compatible
+                    #chunk += bytes([length])*length
+                    chunk += struct.pack('B', length)*length
+                outfile.write(cipher.encrypt(chunk))
+
+def decrypt_file(key, in_filename, iv, original_size, out_filename, chunksize=16*1024):
+    with open(in_filename, 'rb') as infile:
+        decryptor = AES.new(key, AES.MODE_CBC, iv)
+
+        with open(out_filename, 'wb') as outfile:
+            while True:
+                chunk = infile.read(chunksize)
+                if len(chunk) == 0:
+                    break
+                outfile.write(decryptor.decrypt(chunk))
+            outfile.truncate(original_size)
+
+
+def put_file(s3client, ciphertext_blob, new_iv, encrypt_ctx, upload_filename, unencrypted_file_size, bucket_name, key_name):
+
+  matdesc_string = json.dumps(encrypt_ctx)
+  metadata = {
+    'x-amz-key-v2': base64.b64encode(ciphertext_blob).decode('utf-8'),
+    'x-amz-iv': base64.b64encode(new_iv).decode('utf-8'),
+    'x-amz-cek-alg': 'AES/CBC/PKCS5Padding',
+    'x-amz-wrap-alg': 'kms',
+    'x-amz-matdesc': matdesc_string,
+    'x-amz-unencrypted-content-length': str(unencrypted_file_size)
+  }
+
+  s3transfer = boto3.s3.transfer.S3Transfer(s3client)
+  s3transfer.upload_file(upload_filename, bucket_name, key_name, extra_args={'Metadata': metadata})
+
+# s3_encryption reads everything into memory. we can avoid this if we add chunking (and file 'handles') to s3_encryption:
+# http://eli.thegreenplace.net/2010/06/25/aes-encryption-of-files-in-python-with-pycrypto
+# http://www.laurentluce.com/posts/python-and-cryptography-with-pycrypto/#highlighter_842384
+# http://legrandin.github.io/pycryptodome/Doc/3.3.1/Crypto.Cipher._mode_cbc.CbcMode-class.html
+# https://github.com/boldfield/s3-encryption/blob/08f544f06e7f86d5df978718d6b3958c2eebba6a/s3_encryption/handler.py#L39
+
+def encrypt_and_put_file(s3, infile, bucket_name, key_name, kms_arn):
+  location_info = s3.get_bucket_location(Bucket=bucket_name)
+  bucket_region = location_info['LocationConstraint']
+
+  kms = boto3.client('kms')
+  encrypt_ctx = {"kms_cmk_id":kms_arn}
+
+  key_data = kms.generate_data_key(KeyId=kms_arn, EncryptionContext=encrypt_ctx, KeySpec="AES_256")
+  new_iv = Random.new().read(AES.block_size)
+  size_infile = os.stat(infile).st_size # unencrypted length
+
+  tmpfh = tempfile.NamedTemporaryFile()
+  outfile = tmpfh.name
+
+  encrypt_file(key_data['Plaintext'], infile, new_iv, size_infile, outfile, chunksize=16*1024)
+  put_file(s3, key_data['CiphertextBlob'], new_iv, encrypt_ctx, outfile, size_infile, bucket_name, key_name)
+  return key_name
+
+def get_and_decrypt_file(s3, bucket_name, key_name, dest_file):
+  location_info = s3.get_bucket_location(Bucket=bucket_name)
+  bucket_region = location_info['LocationConstraint']
+  object_info = s3.head_object(Bucket=bucket_name, Key=key_name)
+
+  metadata = object_info['Metadata']
+  material_json = object_info['Metadata']['x-amz-matdesc']
+  # material_json is a string of json. Yes, json inside json.
+
+  envelope_key = base64.b64decode(metadata['x-amz-key-v2'])
+  envelope_iv = base64.b64decode(metadata['x-amz-iv'])
+  encrypt_ctx = json.loads(metadata['x-amz-matdesc'])
+  original_size = metadata['x-amz-unencrypted-content-length']
+
+  kms = boto3.client('kms')
+  decrypted_envelope_key = kms.decrypt(CiphertextBlob=envelope_key,EncryptionContext=encrypt_ctx)
+
+  tmpfh = tempfile.NamedTemporaryFile()
+
+  s3.download_file(bucket_name, key_name, tmpfh.name)
+  decrypt_file(decrypted_envelope_key['Plaintext'], tmpfh.name, envelope_iv, int(original_size), dest_file)
+  return dest_file
+
+def main():
+    argument_spec = dict()
+    argument_spec.update(dict(
+            state = dict(default='put', choices=['get', 'put'], aliases=['mode']),
+            path = dict(required=True, aliases=['src', 'dest']),
+            bucket = dict(required=True),
+            key = dict(required=True),
+            permission = dict(default='private'),
+            kms_arn = dict() # required if state=put
+            #aws_region = dict(required=False)
+        )
+    )
+
+    module = AnsibleModule(
+        argument_spec=argument_spec,
+    )
+
+    state = module.params.get('state')
+    path = module.params.get('path')
+    bucket = module.params.get('bucket')
+    key = module.params.get('key')
+    aws_region = module.params.get('aws_region')
+    permission = module.params.get('permission')
+    kms_arn = module.params.get('kms_arn')
+
+    if aws_region:
+      s3_client = boto3.client('s3', region_name=aws_region)
+    else:
+      s3_client = boto3.client('s3')
+
+    data = { 'failed': True }
+    if state == 'get':
+      data['result'] = get_and_decrypt_file(s3_client, bucket, key, path)
+      data['failed'] = False
+    elif state == 'put':
+      data['result'] = encrypt_and_put_file(s3_client, path, bucket, key, kms_arn)
+      data['failed'] = False
+
+    return module.exit_json(**data)
+
+# import module snippets
+from ansible.module_utils.basic import *
+
+if __name__ == "__main__":
+    main()

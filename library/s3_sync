@@ -1,0 +1,141 @@
+#!/usr/bin/python
+#
+# copyright Ted Timmons 2016 (for now; see repo's modified MIT license)
+# authoritative mostly-open-source version is here: https://github.com/tedder/tedder_ansible_library/blob/master/library/s3_sync
+
+
+DOCUMENTATION = '''
+---
+module: s3_sync
+version_added: "external"
+short_description:
+description:
+- Synchronize a directory of files with S3 at high speed. (`s3` is very slow speed for more than a few files)
+- No attempt has been made to ensure correct python libraries are installed. The root of this repo should have a requirements.txt, I suppose.
+options:
+  state:
+    description:
+    - put/get
+    default: put
+    required: true
+  path:
+    description:
+    - Base path to upload. Everything in this directory (and subdirs) will be uploaded, and this path will be stripped from the S3 key.
+    type: string
+    required: true
+  bucket:
+    description:
+    -
+    type: string
+    required: true
+  key_prefix:
+    description:
+    -
+    type: string
+    required: true
+  permission:
+    description:
+    - Set the canned permissions on the object/bucket that are created. The permissions that can be set are 'private', 'public-read', 'public-read-write', 'authenticated-read'. Does not accept a list.
+    required: false
+    default: private
+
+author: Ted Timmons
+'''
+
+EXAMPLES = '''
+- name: upload to s3
+  s3_sync: state=put path=/home/generated_files/ bucket=mybucket key_prefix=generated/
+
+'''
+
+try:
+    import json
+except ImportError:
+    import simplejson as json
+
+import boto3
+import datetime
+
+
+# yes, a global. gasp.
+data = { 'changed':False, 'debug': [], 'filelist': [], 'keylist': [] }
+
+def upload_directory(s3, curr_path, base_dir, key_prefix, bucket, permission):
+  data['debug'].append("have path: {}".format(curr_path))
+
+  for filename in os.listdir(curr_path):
+    fullpath = os.path.join(curr_path, filename)
+    data['debug'].append("seeing: {}".format(fullpath))
+    if os.path.isdir(fullpath):
+      # recurse into the dir
+      #recurse_glob = os.path.join(filename, '*')
+      upload_directory(s3, fullpath, base_dir, key_prefix, bucket, permission)
+      continue
+
+    # base_dir doesn't get changed when we recurse, so it contains the
+    # left part of the path that we should remove. That way our key
+    # name is relative, e.g., foo.log instead of /var/logs/foo.log
+    full_key = key_prefix + os.path.relpath(fullpath, base_dir)
+    #full_filename = os.path.join(key_prefix, filename)
+    data['debug'].append("uploading: {} to {}/{} with basedir {}".format(fullpath, bucket, full_key, base_dir))
+    s3.upload_file(fullpath, bucket, full_key, ExtraArgs={ 'ACL': permission })
+
+    data['filelist'].append(fullpath)
+    data['keylist'].append(full_key)
+
+
+def sample_returns():
+  return true
+  #return module.exit_json(changed=True, msg=import_out,
+  #        rc=rc, cmd=import_cmd, stdout_lines=import_out)
+  #return module.exit_json(changed=False, msg=import_out,
+  #        rc=0, cmd=import_cmd, stdout_lines=import_out)
+  #return module.fail_json(msg=import_out, rc=rc, cmd=import_cmd)
+
+def main():
+    argument_spec = dict()
+    argument_spec.update(dict(
+            state = dict(default='put', choices=['get', 'put']),
+            path = dict(required=True),
+            bucket = dict(required=True),
+            key_prefix = dict(required=True),
+            permission = dict(default='private')
+            #aws_region = dict(required=False)
+        )
+    )
+
+    module = AnsibleModule(
+        argument_spec=argument_spec,
+    )
+
+    state = module.params.get('state')
+    path = module.params.get('path')
+    bucket = module.params.get('bucket')
+    key_prefix = module.params.get('key_prefix')
+    aws_region = module.params.get('aws_region')
+    permission = module.params.get('permission')
+
+    if aws_region:
+      s3_client = boto3.client('s3', region_name=aws_region)
+    else:
+      s3_client = boto3.client('s3')
+
+    #s3transfer = S3Transfer(s3_client)
+
+    data['debug'].append("starting path: {}".format(path))
+    expanded_path = os.path.expanduser(os.path.expandvars(path))
+    data['debug'].append("expanded path: {}".format(expanded_path))
+    # path.join with a second blank argument guarantees a trailing slash.
+    # python's behavior without that trailing slash is weird, it actually
+    # chops off the last dir if it doesn't have that trailing slash.
+    #base_dir = os.path.dirname(os.path.join(expanded_glob, ''))
+
+    upload_directory(s3_client, expanded_path, expanded_path, key_prefix, bucket, permission)
+
+    return module.exit_json(**data)
+
+# import module snippets
+from ansible.module_utils.basic import *
+
+if __name__ == "__main__":
+    main()
